@@ -9,14 +9,6 @@
 #define INET_ADDRSTRLEN 16
 #endif
 
-typedef struct {
-    rx_socket_t sock;
-    struct ip_mreq mreq;
-    int used;
-} rx_membership_t;
-
-static rx_membership_t g_memberships[16];
-
 static void rx_log(st2110rx_log_cb cb, void *ud, st2110rx_log_level_t level, const char *fmt, ...)
 {
     char msg[256];
@@ -32,32 +24,8 @@ static void rx_log(st2110rx_log_cb cb, void *ud, st2110rx_log_level_t level, con
     cb(level, msg, ud);
 }
 
-static int rx_register_membership(rx_socket_t sock, const struct ip_mreq *mreq)
-{
-    size_t i;
-    for (i = 0; i < sizeof(g_memberships) / sizeof(g_memberships[0]); ++i) {
-        if (!g_memberships[i].used) {
-            g_memberships[i].used = 1;
-            g_memberships[i].sock = sock;
-            g_memberships[i].mreq = *mreq;
-            return 0;
-        }
-    }
-    return -1;
-}
-
-static int rx_find_membership(rx_socket_t sock)
-{
-    size_t i;
-    for (i = 0; i < sizeof(g_memberships) / sizeof(g_memberships[0]); ++i) {
-        if (g_memberships[i].used && g_memberships[i].sock == sock) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-rx_socket_t rx_udp_create(const st2110rx_config_t *config, st2110rx_log_cb log_cb, void *log_ud)
+rx_socket_t rx_udp_create(const st2110rx_config_t *config, st2110rx_log_cb log_cb, void *log_ud,
+                           struct ip_mreq *mreq_out)
 {
     rx_socket_t sock;
     struct sockaddr_in bind_addr;
@@ -128,29 +96,25 @@ rx_socket_t rx_udp_create(const st2110rx_config_t *config, st2110rx_log_cb log_c
         return RX_INVALID_SOCKET;
     }
 
-    if (rx_register_membership(sock, &mreq) != 0) {
-        rx_log(log_cb, log_ud, ST2110RX_LOG_WARN, "membership registry full, drop on close may be skipped");
+    if (mreq_out) {
+        *mreq_out = mreq;
     }
 
     return sock;
 }
 
-void rx_udp_destroy(rx_socket_t sock)
+void rx_udp_destroy(rx_socket_t sock, const struct ip_mreq *mreq)
 {
-    int idx;
-
     if (sock == RX_INVALID_SOCKET) {
         return;
     }
 
-    idx = rx_find_membership(sock);
-    if (idx >= 0) {
+    if (mreq) {
         (void)setsockopt(sock,
                          IPPROTO_IP,
                          IP_DROP_MEMBERSHIP,
-                         (const char *)&g_memberships[idx].mreq,
-                         (int)sizeof(g_memberships[idx].mreq));
-        g_memberships[idx].used = 0;
+                         (const char *)mreq,
+                         (int)sizeof(*mreq));
     }
 
     (void)rx_socket_close(sock);

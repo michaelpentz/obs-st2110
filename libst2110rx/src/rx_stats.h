@@ -12,6 +12,8 @@ typedef struct {
     rx_atomic64_t frames_dropped;
     rx_atomic64_t packets_received;
     rx_atomic64_t packets_lost;
+    /* Seqlock-protected fields (written by receiver thread only) */
+    rx_atomic64_t seq;              /* odd = write in progress, even = consistent */
     double jitter;
     double avg_interpacket_gap_us;
     uint32_t last_rtp_ts;

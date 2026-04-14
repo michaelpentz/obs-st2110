@@ -40,8 +40,11 @@ void rx_stats_packet(rx_stats_state_t *s, uint32_t rtp_timestamp)
         if (diff < 0) {
             diff = -diff;
         }
+        /* Seqlock: odd sequence = write in progress */
+        rx_atomic64_add(&s->seq, 1);
         s->jitter += ((double)diff - s->jitter) / 16.0;
         s->avg_interpacket_gap_us += ((double)d_arrival - s->avg_interpacket_gap_us) / 256.0;
+        rx_atomic64_add(&s->seq, 1);
     }
 
     s->last_rtp_ts = rtp_timestamp;
@@ -64,6 +67,9 @@ void rx_stats_lost(rx_stats_state_t *s, uint64_t count)
 
 void rx_stats_snapshot(const rx_stats_state_t *s, st2110rx_stats_t *out)
 {
+    int64_t seq1, seq2;
+    int attempts = 0;
+
     if (!s || !out) {
         return;
     }
@@ -72,6 +78,15 @@ void rx_stats_snapshot(const rx_stats_state_t *s, st2110rx_stats_t *out)
     out->frames_dropped = (uint64_t)rx_atomic64_load(&s->frames_dropped);
     out->packets_received = (uint64_t)rx_atomic64_load(&s->packets_received);
     out->packets_lost = (uint64_t)rx_atomic64_load(&s->packets_lost);
-    out->jitter_us = s->jitter;
-    out->avg_interpacket_gap_us = s->avg_interpacket_gap_us;
+
+    /* Seqlock read: retry until we get a consistent pair */
+    do {
+        seq1 = rx_atomic64_load(&s->seq);
+        out->jitter_us = s->jitter;
+        out->avg_interpacket_gap_us = s->avg_interpacket_gap_us;
+        seq2 = rx_atomic64_load(&s->seq);
+        if (++attempts > 1000) {
+            break; /* give up, return potentially torn values rather than spinning forever */
+        }
+    } while (seq1 != seq2 || (seq1 & 1));
 }

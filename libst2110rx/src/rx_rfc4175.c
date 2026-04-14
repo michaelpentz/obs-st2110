@@ -16,6 +16,13 @@ int rx_assembler_init(rx_frame_assembler_t *a, uint32_t width, uint32_t height)
         return -1;
     }
 
+    /* Reject dimensions that would overflow stride or buffer size calculations.
+       Max safe: width=32766 (16383 groups * 5 = 81915 stride), height=65535
+       -> 81915 * 65535 = ~5.4GB, fits in size_t on 64-bit. Cap at 8K to be safe. */
+    if (width > 8192 || height > 4320) {
+        return -1;
+    }
+
     memset(a, 0, sizeof(*a));
     a->width = width;
     a->height = height;

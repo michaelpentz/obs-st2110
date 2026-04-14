@@ -10,14 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-rx_socket_t rx_udp_create(const st2110rx_config_t *config, st2110rx_log_cb log_cb, void *log_ud);
-void rx_udp_destroy(rx_socket_t sock);
+rx_socket_t rx_udp_create(const st2110rx_config_t *config, st2110rx_log_cb log_cb, void *log_ud,
+                           struct ip_mreq *mreq_out);
+void rx_udp_destroy(rx_socket_t sock, const struct ip_mreq *mreq);
 
 struct st2110rx {
     st2110rx_config_t config;
     rx_socket_t sock;
+    struct ip_mreq mreq;       /* per-instance IGMP membership (no global state) */
     rx_thread_t thread;
-    volatile bool running;
+    rx_atomic64_t running;      /* 1 = running, 0 = stopped (atomic for thread safety) */
     bool thread_started;
     bool sockets_initialized;
 
@@ -94,10 +96,10 @@ static void rx_receiver_loop(st2110rx_t *rx)
 {
     rx_thread_set_high_priority();
 
-    while (rx->running) {
+    while (rx_atomic64_load(&rx->running)) {
         int n = recvfrom(rx->sock, (char *)rx->pkt_buf, (int)rx->pkt_buf_size, 0, NULL, NULL);
         if (n <= 0) {
-            if (!rx->running) {
+            if (!rx_atomic64_load(&rx->running)) {
                 break;
             }
             continue;
@@ -196,7 +198,7 @@ int st2110rx_start(st2110rx_t *rx)
     if (!rx) {
         return ST2110RX_ERR_INVALID;
     }
-    if (rx->running) {
+    if (rx_atomic64_load(&rx->running)) {
         return ST2110RX_OK;
     }
 
@@ -206,7 +208,7 @@ int st2110rx_start(st2110rx_t *rx)
     }
     rx->sockets_initialized = true;
 
-    rx->sock = rx_udp_create(&rx->config, rx->config.log_cb, rx->config.log_user_data);
+    rx->sock = rx_udp_create(&rx->config, rx->config.log_cb, rx->config.log_user_data, &rx->mreq);
     if (rx->sock == RX_INVALID_SOCKET) {
         if (rx->sockets_initialized) {
             rx_socket_cleanup();
@@ -215,10 +217,10 @@ int st2110rx_start(st2110rx_t *rx)
         return ST2110RX_ERR_BIND;
     }
 
-    rx->running = true;
+    rx_atomic64_store(&rx->running, 1);
     if (rx_thread_create(&rx->thread, rx_thread_entry, rx) != 0) {
-        rx->running = false;
-        rx_udp_destroy(rx->sock);
+        rx_atomic64_store(&rx->running, 0);
+        rx_udp_destroy(rx->sock, &rx->mreq);
         rx->sock = RX_INVALID_SOCKET;
         if (rx->sockets_initialized) {
             rx_socket_cleanup();
@@ -237,10 +239,10 @@ void st2110rx_stop(st2110rx_t *rx)
         return;
     }
 
-    rx->running = false;
+    rx_atomic64_store(&rx->running, 0);
 
     if (rx->sock != RX_INVALID_SOCKET) {
-        rx_udp_destroy(rx->sock);
+        rx_udp_destroy(rx->sock, &rx->mreq);
         rx->sock = RX_INVALID_SOCKET;
     }
 
