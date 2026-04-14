@@ -1,0 +1,6 @@
+build/
+.vs/
+.vscode/
+CMakeUserPresets.json
+*.user
+_write_test.tmp
