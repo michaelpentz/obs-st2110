@@ -4,3 +4,17 @@ build/
 CMakeUserPresets.json
 *.user
 _write_test.tmp
+
+# Local config & secrets (never commit)
+.env
+.env.local
+.env.*.local
+.wiki-compiler.local.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_ed25519
+id_rsa
+id_ecdsa
+id_dsa
