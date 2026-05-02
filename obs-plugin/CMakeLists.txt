@@ -1,23 +1,39 @@
 # OBS Studio source plugin for SMPTE ST 2110-20 receive.
 #
-# Build requires OBS Studio development headers + import library. On Windows,
-# the easiest path is to install OBS Studio (which ships obs.lib + headers in
-# the dev package) and point libobs_DIR at its CMake config:
+# Two build paths:
 #
-#   cmake -B build -G Ninja -DBUILD_OBS_PLUGIN=ON \
-#         -Dlibobs_DIR=C:/Program Files/obs-studio/cmake
+# 1. Manual paths (Windows, what build-windows.bat uses):
+#      cmake -DBUILD_OBS_PLUGIN=ON \
+#            -DOBS_SOURCE_DIR=<obs-source-dir> \
+#            -DOBS_LIB=path/to/obs.lib
 #
-# On Linux, use the system libobs-dev package (apt install libobs-dev).
+# 2. find_package (Linux with libobs-dev installed):
+#      cmake -DBUILD_OBS_PLUGIN=ON
+#
+# See obs-plugin/BUILDING.md for the full recipe.
 
 cmake_minimum_required(VERSION 3.16)
 
-find_package(libobs QUIET)
-
-if(NOT libobs_FOUND)
-    message(WARNING
-        "libobs not found. Set -Dlibobs_DIR to the directory containing "
-        "libobsConfig.cmake. Skipping obs-plugin build.")
-    return()
+if(OBS_SOURCE_DIR AND OBS_LIB)
+    # Manual mode: caller pointed us at headers + import lib.
+    if(NOT EXISTS "${OBS_SOURCE_DIR}/libobs/obs-module.h")
+        message(FATAL_ERROR "OBS_SOURCE_DIR=${OBS_SOURCE_DIR} does not contain libobs/obs-module.h")
+    endif()
+    if(NOT EXISTS "${OBS_LIB}")
+        message(FATAL_ERROR "OBS_LIB=${OBS_LIB} not found")
+    endif()
+    set(_obs_includes "${OBS_SOURCE_DIR}/libobs")
+    set(_obs_libs "${OBS_LIB}")
+    set(_obs_have_target FALSE)
+else()
+    find_package(libobs QUIET)
+    if(NOT libobs_FOUND)
+        message(WARNING
+            "libobs not found and OBS_SOURCE_DIR / OBS_LIB not set. "
+            "Skipping obs-plugin build.")
+        return()
+    endif()
+    set(_obs_have_target TRUE)
 endif()
 
 add_library(obs-st2110 MODULE
@@ -26,7 +42,13 @@ add_library(obs-st2110 MODULE
 )
 
 target_include_directories(obs-st2110 PRIVATE src)
-target_link_libraries(obs-st2110 PRIVATE st2110rx_static OBS::libobs)
+
+if(_obs_have_target)
+    target_link_libraries(obs-st2110 PRIVATE st2110rx_static OBS::libobs)
+else()
+    target_include_directories(obs-st2110 PRIVATE ${_obs_includes})
+    target_link_libraries(obs-st2110 PRIVATE st2110rx_static ${_obs_libs})
+endif()
 
 if(WIN32)
     target_compile_definitions(obs-st2110 PRIVATE _CRT_SECURE_NO_WARNINGS)

@@ -18,7 +18,6 @@
  */
 
 #include <obs-module.h>
-#include <util/threading.h>
 
 #include <stdint.h>
 #include <stdlib.h>
