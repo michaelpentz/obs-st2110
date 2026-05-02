@@ -38,10 +38,25 @@ Output: `build/obs-plugin/obs-st2110.dll` plus a `data/` tree.
 
 ## Install
 
+OBS on Windows scans **two** plugin locations:
+
+| Location | When |
+|----------|------|
+| `<obs-install>/obs-plugins/64bit/` and `<obs-install>/data/obs-plugins/<name>/` | Bundled with OBS install. Needs admin to write. |
+| `C:\ProgramData\obs-studio\plugins\<name>\bin\64bit\` and `\<name>\data\` | Per-machine extra plugins. Often writable without admin (depends on `C:\ProgramData` ACLs). |
+
+**OBS does NOT scan `%APPDATA%\obs-studio\plugins\` on Windows** — that path
+is macOS/Linux only. Putting the plugin there does nothing; the source
+won't appear in the **+ Source** menu.
+
+Use the ProgramData path for fastest install:
+
 ```powershell
-# Run as Administrator
-copy build\obs-plugin\obs-st2110.dll "C:\Program Files (x86)\obs-studio\obs-plugins\64bit\"
-xcopy obs-plugin\data\* "C:\Program Files (x86)\obs-studio\data\obs-plugins\obs-st2110\" /s /e /i
+$src = "$PWD"
+$dest = "C:\ProgramData\obs-studio\plugins\obs-st2110"
+New-Item -ItemType Directory -Force -Path "$dest\bin\64bit", "$dest\data\locale" | Out-Null
+Copy-Item -Force "$src\build\obs-plugin\obs-st2110.dll" "$dest\bin\64bit\"
+Copy-Item -Force "$src\obs-plugin\data\locale\en-US.ini" "$dest\data\locale\"
 ```
 
 Restart OBS. The source should appear in the **+ Source** menu as
