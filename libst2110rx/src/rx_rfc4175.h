@@ -32,6 +32,7 @@ typedef struct {
     uint32_t last_ts;
     bool has_prev_packet;
     bool frame_incomplete;
+    bool frame_delivered;
     uint32_t frame_number;
     uint32_t delivered_incomplete;
     uint32_t delivered_timestamp;

@@ -157,6 +157,17 @@ int rx_assembler_process_packet(
 
     payload_len = pkt_len - (size_t)(payload - pkt);
 
+    /* RFC 4175 §3.1: the first 16 bits of the payload are the Extended
+       Sequence Number, prepended to the standard RTP sequence to detect
+       wraparound under high packet rates. We don't currently use it for
+       loss detection (rx_stats_packet works off the basic 16-bit RTP
+       sequence), but we MUST skip it before parsing line segment headers. */
+    if (payload_len < 2) {
+        return 0;
+    }
+    payload += 2;
+    payload_len -= 2;
+
     if (a->has_prev_packet) {
         uint16_t expected = (uint16_t)(a->last_seq + 1);
         if (seq != expected) {
@@ -168,54 +179,94 @@ int rx_assembler_process_packet(
         }
     }
 
-    if (a->has_prev_packet && timestamp != a->last_ts && !marker) {
-        a->frame_incomplete = true;
-        deliver_frame(a, frame_cb, user_data, output_fmt, a->last_ts);
-        frames_completed++;
+    if (a->has_prev_packet && timestamp != a->last_ts) {
+        if (!a->frame_delivered && !marker) {
+            a->frame_incomplete = true;
+            deliver_frame(a, frame_cb, user_data, output_fmt, a->last_ts);
+            frames_completed++;
+        }
+        a->frame_delivered = false;
     }
 
     a->last_seq = seq;
     a->last_ts = timestamp;
     a->has_prev_packet = true;
 
-    p = payload;
-    end = payload + payload_len;
-    while (p + 6 <= end) {
-        uint16_t seg_length = (uint16_t)((p[0] << 8) | p[1]);
-        uint16_t line_field = (uint16_t)((p[2] << 8) | p[3]);
-        uint16_t offset_cont = (uint16_t)((p[4] << 8) | p[5]);
-        uint16_t line_no = (uint16_t)(line_field & 0x7FFF);
-        uint16_t pixel_offset = (uint16_t)(offset_cont & 0x7FFF);
-        bool continuation = (offset_cont & 0x8000) != 0;
-        size_t byte_offset;
-        size_t dst_offset;
-        size_t buf_size;
+    /* RFC 4175 §3.1: when a packet carries multiple line segments, ALL
+       headers come first (each with the C bit set except the last), then
+       ALL payloads follow in the same order. The earlier implementation
+       interleaved header+payload+header+payload, which corrupted any
+       packet that straddled a line boundary (typical at line end/start).
+       Parse all headers into a small stack array, then walk the payloads. */
+    {
+        struct {
+            uint16_t line_no;
+            uint16_t pixel_offset;
+            uint16_t seg_length;
+        } segments[8];
+        size_t n_segments = 0;
+        size_t buf_size = (size_t)a->fill_stride * a->height;
 
-        p += 6;
-        if (line_no >= a->height) {
-            break;
+        p = payload;
+        end = payload + payload_len;
+
+        for (;;) {
+            uint16_t seg_length;
+            uint16_t line_field;
+            uint16_t offset_cont;
+            bool continuation;
+
+            if (p + 6 > end || n_segments >= sizeof(segments) / sizeof(segments[0])) {
+                n_segments = 0; /* malformed or too many segments — drop packet */
+                break;
+            }
+
+            seg_length = (uint16_t)((p[0] << 8) | p[1]);
+            line_field = (uint16_t)((p[2] << 8) | p[3]);
+            offset_cont = (uint16_t)((p[4] << 8) | p[5]);
+            continuation = (offset_cont & 0x8000) != 0;
+
+            segments[n_segments].seg_length = seg_length;
+            segments[n_segments].line_no = (uint16_t)(line_field & 0x7FFF);
+            segments[n_segments].pixel_offset = (uint16_t)(offset_cont & 0x7FFF);
+            n_segments++;
+
+            p += 6;
+            if (!continuation) {
+                break;
+            }
         }
-        if (p + seg_length > end) {
-            break;
-        }
 
-        byte_offset = ((size_t)pixel_offset / a->pixels_per_group) * a->pgroup_size;
-        dst_offset = (size_t)line_no * a->fill_stride + byte_offset;
-        buf_size = (size_t)a->fill_stride * a->height;
-        if (dst_offset + seg_length > buf_size) {
-            break;
-        }
+        for (size_t i = 0; i < n_segments; ++i) {
+            uint16_t line_no = segments[i].line_no;
+            uint16_t pixel_offset = segments[i].pixel_offset;
+            uint16_t seg_length = segments[i].seg_length;
+            size_t byte_offset;
+            size_t dst_offset;
 
-        memcpy(a->fill_buf + dst_offset, p, seg_length);
-        p += seg_length;
+            if (line_no >= a->height) {
+                p += seg_length; /* still must walk past this segment's payload */
+                continue;
+            }
+            if (p + seg_length > end) {
+                break;
+            }
 
-        if (!continuation) {
-            break;
+            byte_offset = ((size_t)pixel_offset / a->pixels_per_group) * a->pgroup_size;
+            dst_offset = (size_t)line_no * a->fill_stride + byte_offset;
+            if (dst_offset + seg_length > buf_size) {
+                p += seg_length;
+                continue;
+            }
+
+            memcpy(a->fill_buf + dst_offset, p, seg_length);
+            p += seg_length;
         }
     }
 
     if (marker) {
         deliver_frame(a, frame_cb, user_data, output_fmt, timestamp);
+        a->frame_delivered = true;
         frames_completed++;
     }
 
