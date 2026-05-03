@@ -41,7 +41,14 @@ rx_socket_t rx_udp_create(const st2110rx_config_t *config, st2110rx_log_cb log_c
         return RX_INVALID_SOCKET;
     }
 
+#ifdef _WIN32
+    /* WSASocket with WSA_FLAG_OVERLAPPED is required for IOCP-based receive.
+       The plain socket() returns an overlapped socket on Windows by default
+       in modern OS versions, but being explicit avoids surprises. */
+    sock = WSASocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED);
+#else
     sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+#endif
     if (sock == RX_INVALID_SOCKET) {
         rx_log(log_cb, log_ud, ST2110RX_LOG_ERROR, "socket() failed: %d", rx_socket_error());
         return RX_INVALID_SOCKET;

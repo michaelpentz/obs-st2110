@@ -4,12 +4,15 @@
 #include <string.h>
 
 #define PGROUP_422_10BIT 5
+#define PGROUP_422_8BIT  4
 #define PIXELS_PER_GROUP 2
 #define RTP_MARKER_MASK 0x0080
 #define RTP_X_MASK 0x1000
 
-int rx_assembler_init(rx_frame_assembler_t *a, uint32_t width, uint32_t height)
+int rx_assembler_init(rx_frame_assembler_t *a, uint32_t width, uint32_t height,
+                      st2110rx_pixfmt_t input_fmt)
 {
+    uint32_t pgroup_size;
     size_t buf_size;
 
     if (!a || width == 0 || height == 0 || (width % 2) != 0) {
@@ -23,12 +26,29 @@ int rx_assembler_init(rx_frame_assembler_t *a, uint32_t width, uint32_t height)
         return -1;
     }
 
+    /* RFC 4175 pgroup size is set by the wire pixel format. 4:2:2 8-bit packs
+       2 pixels into 4 bytes (UYVY-style); 4:2:2 10-bit packs 2 pixels into
+       5 bytes (big-endian, see rx_convert_be10_to_uyvy). Other formats are
+       unsupported here. The assembler MUST match the sender's depth — using
+       the wrong pgroup leaves most of the line buffer zeroed and renders
+       black/green/torn frames downstream. */
+    switch (input_fmt) {
+    case ST2110RX_FMT_YCBCR422_10BIT:
+        pgroup_size = PGROUP_422_10BIT;
+        break;
+    case ST2110RX_FMT_UYVY:
+        pgroup_size = PGROUP_422_8BIT;
+        break;
+    default:
+        return -1;
+    }
+
     memset(a, 0, sizeof(*a));
     a->width = width;
     a->height = height;
-    a->pgroup_size = PGROUP_422_10BIT;
+    a->pgroup_size = pgroup_size;
     a->pixels_per_group = PIXELS_PER_GROUP;
-    a->fill_stride = (width / PIXELS_PER_GROUP) * PGROUP_422_10BIT;
+    a->fill_stride = (width / PIXELS_PER_GROUP) * pgroup_size;
 
     buf_size = (size_t)a->fill_stride * height;
     a->fill_buf = (uint8_t *)calloc(1, buf_size);

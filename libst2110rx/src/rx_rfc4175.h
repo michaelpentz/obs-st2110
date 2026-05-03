@@ -38,7 +38,8 @@ typedef struct {
     uint32_t delivered_timestamp;
 } rx_frame_assembler_t;
 
-int rx_assembler_init(rx_frame_assembler_t *a, uint32_t width, uint32_t height);
+int rx_assembler_init(rx_frame_assembler_t *a, uint32_t width, uint32_t height,
+                      st2110rx_pixfmt_t input_fmt);
 void rx_assembler_free(rx_frame_assembler_t *a);
 int rx_assembler_process_packet(
     rx_frame_assembler_t *a,
