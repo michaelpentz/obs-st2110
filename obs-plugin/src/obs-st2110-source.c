@@ -18,6 +18,7 @@
  */
 
 #include <obs-module.h>
+#include <util/platform.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -25,12 +26,13 @@
 
 #include "st2110rx.h"
 
-#define ST2110_SETTING_ADDR       "multicast_addr"
-#define ST2110_SETTING_PORT       "port"
-#define ST2110_SETTING_IFACE      "interface_addr"
-#define ST2110_SETTING_WIDTH      "width"
-#define ST2110_SETTING_HEIGHT     "height"
-#define ST2110_SETTING_SOCKBUF_MB "socket_buffer_mb"
+#define ST2110_SETTING_ADDR        "multicast_addr"
+#define ST2110_SETTING_PORT        "port"
+#define ST2110_SETTING_IFACE       "interface_addr"
+#define ST2110_SETTING_WIDTH       "width"
+#define ST2110_SETTING_HEIGHT      "height"
+#define ST2110_SETTING_SOCKBUF_MB  "socket_buffer_mb"
+#define ST2110_SETTING_INPUT_DEPTH "input_depth"
 
 struct st2110_source {
     obs_source_t *source;
@@ -40,6 +42,12 @@ struct st2110_source {
        before the first frame arrives. */
     uint32_t width;
     uint32_t height;
+
+    /* Frame delivery counters for diagnostic logging. */
+    uint64_t frames_delivered;
+    uint64_t frames_skipped_incomplete;
+    uint64_t last_log_frames;
+    uint64_t last_log_time_ns;
 };
 
 static const char *st2110_get_name(void *unused)
@@ -65,16 +73,33 @@ static void st2110_frame_cb(const st2110rx_frame_t *frame, void *ud)
 {
     struct st2110_source *ctx = (struct st2110_source *)ud;
     struct obs_source_frame obs_frame;
+    uint64_t now;
 
-    if (!ctx || !frame || frame->incomplete) {
+    if (!ctx || !frame) {
         return;
+    }
+
+    /* Display incomplete frames too. Better to show a slightly torn frame
+       than to freeze on the last good one — the user can see the issue and
+       diagnose. The library marks `incomplete=true` if any packet within a
+       frame was dropped or out-of-order; on Windows this can be common
+       depending on recvfrom timing and SO_RCVBUF. */
+    if (frame->incomplete) {
+        ctx->frames_skipped_incomplete++;
     }
 
     memset(&obs_frame, 0, sizeof(obs_frame));
     obs_frame.format = VIDEO_FORMAT_UYVY;
     obs_frame.width = frame->width;
     obs_frame.height = frame->height;
-    obs_frame.timestamp = frame->timestamp_ns;
+    /* OBS expects timestamps in its monotonic clock domain (os_gettime_ns).
+       The library reports an RTP-derived timestamp (relative to a 90 kHz
+       clock, wraps every ~13h), which is meaningless to OBS — using it
+       directly causes async sources to freeze on the first frame because
+       every subsequent frame looks "older" than the OBS clock. We have
+       no audio to sync against, so just stamp with the current OBS clock
+       value and let frames flow as they arrive. */
+    obs_frame.timestamp = os_gettime_ns();
     obs_frame.data[0] = frame->data[0];
     obs_frame.linesize[0] = frame->linesize[0];
 
@@ -85,6 +110,33 @@ static void st2110_frame_cb(const st2110rx_frame_t *frame, void *ud)
                                 obs_frame.color_range_max);
 
     obs_source_output_video(ctx->source, &obs_frame);
+
+    /* Log a one-line summary every ~5 seconds so we can see what's happening. */
+    ctx->frames_delivered++;
+    now = os_gettime_ns();
+    if (ctx->last_log_time_ns == 0) {
+        ctx->last_log_time_ns = now;
+        ctx->last_log_frames = ctx->frames_delivered;
+    } else if (now - ctx->last_log_time_ns >= 5000000000ULL) {
+        uint64_t window_frames = ctx->frames_delivered - ctx->last_log_frames;
+        double seconds = (double)(now - ctx->last_log_time_ns) / 1e9;
+        st2110rx_stats_t stats;
+        if (ctx->rx && st2110rx_get_stats(ctx->rx, &stats) == ST2110RX_OK) {
+            blog(LOG_INFO,
+                 "[obs-st2110] %.1f s window: delivered=%llu (%.1f fps), "
+                 "incomplete_total=%llu, lib: frames=%llu drops=%llu pkts=%llu lost=%llu",
+                 seconds,
+                 (unsigned long long)window_frames,
+                 (double)window_frames / seconds,
+                 (unsigned long long)ctx->frames_skipped_incomplete,
+                 (unsigned long long)stats.frames_received,
+                 (unsigned long long)stats.frames_dropped,
+                 (unsigned long long)stats.packets_received,
+                 (unsigned long long)stats.packets_lost);
+        }
+        ctx->last_log_time_ns = now;
+        ctx->last_log_frames = ctx->frames_delivered;
+    }
 }
 
 static void st2110_destroy_receiver(struct st2110_source *ctx)
@@ -108,7 +160,7 @@ static void st2110_create_receiver(struct st2110_source *ctx, obs_data_t *settin
     cfg.interface_addr = obs_data_get_string(settings, ST2110_SETTING_IFACE);
     cfg.width = (uint32_t)obs_data_get_int(settings, ST2110_SETTING_WIDTH);
     cfg.height = (uint32_t)obs_data_get_int(settings, ST2110_SETTING_HEIGHT);
-    cfg.input_fmt = ST2110RX_FMT_YCBCR422_10BIT;
+    cfg.input_fmt = (st2110rx_pixfmt_t)obs_data_get_int(settings, ST2110_SETTING_INPUT_DEPTH);
     cfg.output_fmt = ST2110RX_FMT_UYVY;
     cfg.socket_buffer_size = (uint32_t)(
         obs_data_get_int(settings, ST2110_SETTING_SOCKBUF_MB) * 1024UL * 1024UL);
@@ -178,6 +230,12 @@ static void st2110_defaults(obs_data_t *settings)
     obs_data_set_default_int(settings, ST2110_SETTING_WIDTH, 1920);
     obs_data_set_default_int(settings, ST2110_SETTING_HEIGHT, 1080);
     obs_data_set_default_int(settings, ST2110_SETTING_SOCKBUF_MB, 128);
+    /* Default to 8-bit because every common producer in the wild
+       (GStreamer rtpvrawpay from UYVY/YUY2 sources, OBS, ffmpeg without
+       explicit 10-bit caps, V4L2 capture cards) emits 8-bit RFC 4175.
+       10-bit is correct for high-end ST 2110 sources but is the minority
+       case here. User can flip this in the source properties. */
+    obs_data_set_default_int(settings, ST2110_SETTING_INPUT_DEPTH, ST2110RX_FMT_UYVY);
 }
 
 static obs_properties_t *st2110_get_properties(void *data)
@@ -197,6 +255,16 @@ static obs_properties_t *st2110_get_properties(void *data)
                            "Height", 16, 4320, 1);
     obs_properties_add_int(props, ST2110_SETTING_SOCKBUF_MB,
                            "Socket RX buffer (MiB)", 4, 1024, 4);
+
+    {
+        obs_property_t *p_depth = obs_properties_add_list(
+            props, ST2110_SETTING_INPUT_DEPTH,
+            "Input pixel depth", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+        obs_property_list_add_int(p_depth, "8-bit YCbCr 4:2:2 (UYVY pgroup=4)",
+                                  ST2110RX_FMT_UYVY);
+        obs_property_list_add_int(p_depth, "10-bit YCbCr 4:2:2 (RFC 4175 pgroup=5)",
+                                  ST2110RX_FMT_YCBCR422_10BIT);
+    }
 
     return props;
 }
